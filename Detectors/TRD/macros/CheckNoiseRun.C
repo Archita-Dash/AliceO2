@@ -17,6 +17,7 @@
 #include <TTree.h>
 #include <TH1F.h>
 #include <TCanvas.h>
+#include <RDataFrame.h>
 
 #include <fairlogger/Logger.h>
 #include "TRDBase/Calibrations.h"
@@ -26,25 +27,11 @@
 
 using namespace ROOT;
 
-void CheckNoiseRun(const o2::trd::ChannelInfoContainer* calobject);
-TTree* MakeChannelInfoTree(const o2::trd::ChannelInfoContainer* calobject);
-TCanvas* MakeRunSummary(const o2::trd::ChannelInfoContainer* calobject);
-// TCanvas* MakeClassSummary(RDataFrame& df);
+
 template <typename RDF>
 TCanvas* MakeClassSummary(RDF df);
 
-  // TCanvas* MakeClassSummary(ROOT::RDF::RInterface<ROOT::Detail::RDF::RLoopManager, void>& df);
 
-struct channel_info_t {
-  int det;
-  int rob;
-  int mcm;
-  int channel;
-
-  float mean;
-  float rms;
-  uint64_t nentries;
-};
 
 class ChannelStatusClassifier
 {
@@ -60,30 +47,39 @@ class ChannelStatusClassifier
   };
 
   ChannelStatusClassifier(vector<ChannelStatusClass> classes = {
-                            {"Good", kGreen + 1, 9.2, 10.2, 0.7, 1.5},
+                            {"Good", kGreen + 1, 9.2, 10.2, 0.7, 1.8},
                             {"LowNoise", kRed, 9.2, 10.2, 0.0, 0.7},
-                            {"Noisy", kRed, 9.2, 10.2, 1.5, 5.0},
+                            {"Noisy", kRed, 9.2, 10.2, 1.8, 5.0},
                             {"VeryHighNoise", kRed, 8.0, 25.0, 6.0, 30.0},
                             {"High mean", kRed, 10.5, 25.0, 2.0, 6.0},
                             {"Ugly 1", kRed, 200., 350., 15.0, 45.0},
-                            {"Ugly 2", kRed, 200., 350., 45.0, 70.0}}) : mClasses(classes)
+                            {"Ugly 2", kRed, 200., 350., 45.0, 70.0},
+                            {"Ugly 3", kRed, 350., 550., 5.0, 25.0},
+                            {"Ugly 4", kRed, 350., 550., 25.0, 60.0}}) : mClasses(classes)
   {
   }
 
   // the actual classification method
-  int classify(o2::trd::ChannelInfo& c) {return classifyfct(c.getEntries(), c.getMean(), c.getRMS());}
-  int classifyfct(uint64_t nentries, float mean, float rms);
+  int classify(o2::trd::ChannelInfo& c) {return classify(c.getEntries(), c.getMean(), c.getRMS());}
+  int classify(uint64_t nentries, float mean, float rms);
 
   // methods to display classification criteria and results
   void drawClasses(TH2* h);
+  ROOT::RDF::TH1DModel getHistogramModel();
+  TH1* prepareHistogram(TH1* hist);
   TH1* createHistogram();
 
  protected:
   vector<ChannelStatusClass> mClasses;
 };
 
+void CheckNoiseRun(const o2::trd::ChannelInfoContainer* calobject);
+TTree* MakeChannelInfoTree(const o2::trd::ChannelInfoContainer* calobject);
+TCanvas* MakeRunSummary(ROOT::RDF::RNode df, ChannelStatusClassifier& classifier);
+TCanvas* MakeRunSummaryOld(const o2::trd::ChannelInfoContainer* calobject);
+
 // void CheckNoiseRun(const long timestamp = 1679064465077)
-void CheckNoiseRun(const long timestamp)
+o2::trd::ChannelInfoContainer* LoadNoiseCalObject(const long timestamp)
 {
 
   auto& ccdbmgr = o2::ccdb::BasicCCDBManager::instance();
@@ -107,55 +103,68 @@ void CheckNoiseRun(const long timestamp)
     LOG(fatal) << "No chamber calibrations returned from CCDB for TRD calibrations";
   }
 
-  CheckNoiseRun(calobject);
-
+  // CheckNoiseRun(calobject);
+  return calobject;
 }
 
 
-void CheckNoiseRun(const TString filename = "~/Downloads/o2-trd-ChannelInfoContainer_1680185087230.root")
-// void CheckNoiseRun(const TString filename)
+// void CheckNoiseRun(const TString filename = "~/Downloads/o2-trd-ChannelInfoContainer_1680185087230.root")
+o2::trd::ChannelInfoContainer* LoadNoiseCalObject(const TString filename)
 {
   TFile* infile = new TFile(filename);
   o2::trd::ChannelInfoContainer* calobject;
   infile->GetObject("ccdb_object", calobject);
-  
-  CheckNoiseRun(calobject);
+  return calobject;
 }
 
-ChannelStatusClassifier classifier;
 
-void CheckNoiseRun(const o2::trd::ChannelInfoContainer* calobject)
+// void CheckNoiseRun(const o2::trd::ChannelInfoContainer* calobject)
+void CheckNoiseRun()
 {
-
-  if (calobject->getData().size() != o2::trd::constants::NCHANNELSTOTAL) {
-    cerr << "ERROR: ChannelInfoContainer has incorrect length " << calobject->getData().size() << ", expected " << o2::trd::constants::NCHANNELSTOTAL << endl;
-    return;
-  }
-  // auto outfile = new TFile("chinfo.root", "RECREATE");
 
   gStyle->SetLabelSize(0.02, "X");
   gStyle->SetLabelSize(0.02, "Y");
   gStyle->SetTitleSize(0.02, "X");
   gStyle->SetTitleSize(0.02, "Y");
-  gStyle->SetOptStat(0);
+  // gStyle->SetOptStat(0);
 
-  MakeRunSummary(calobject);
-  // auto tree = MakeChannelInfoTree(calobject);
-  // tree->Write();
-
-  // ROOT::RDataFrame df(*tree);
   cout << "Creating RDataFrame" << endl;
-  ROOT::RDataFrame df("chinfo", "chinfo.root");
-  int (ChannelStatusClassifier::*fclassify)(uint64_t,float,float);
-  fclassify = &ChannelStatusClassifier::classifyfct;
+  auto df1 = ROOT::RDataFrame(o2::trd::constants::NCHANNELSTOTAL)
+               .Define("sector", "rdfentry_ / o2::trd::constants::NCHANNELSPERSECTOR")
+               .Define("layer", "(rdfentry_ % o2::trd::constants::NCHANNELSPERSECTOR) / o2::trd::constants::NCHANNELSPERLAYER")
+               .Define("row", "(rdfentry_ % o2::trd::constants::NCHANNELSPERLAYER) / o2::trd::constants::NCHANNELSPERROW")
+               .Define("col", "rdfentry_ % o2::trd::constants::NCHANNELSPERROW");
 
-  cout << "Classifying channels" << endl;
-  auto f = [](uint64_t n, float m, float r) { return classifier.classifyfct(n, m, r); };
-  auto df2 = df.Define("cat", f, {"nentries", "mean", "rms"});
-  // df.Define("cat", (classifier.*classify), {"nentries", "mean", "rms"});
+  // auto calobject = LoadNoiseCalObject(1681210184624);
+  auto calobject = LoadNoiseCalObject("~/Downloads/o2-trd-ChannelInfoContainer_1680185087230.root");
 
-  cout << "Display summary" << endl;
-  MakeClassSummary(df2.Filter("cat==3"));
+  auto df2 = df1
+    .Define("nentries", [calobject](ULong64_t i) { return calobject->getChannel(i).getEntries(); }, {"rdfentry_"})
+    .Define("mean", [calobject](ULong64_t i) { return calobject->getChannel(i).getMean(); }, {"rdfentry_"})
+    .Define("rms", [calobject](ULong64_t i) { return calobject->getChannel(i).getRMS(); }, {"rdfentry_"});
+
+  ChannelStatusClassifier classifier;
+  auto df = df2
+    .Define("class", [&classifier](uint32_t n, float mean, float rms) { return classifier.classify(n, mean, rms); }, {"nentries", "mean", "rms"});
+
+  auto disp = df.Display({"mean","rms", "class"});
+  disp->Print();
+
+  cout << (*df.Mean("rms")) << "  " << (*df.Mean("mean")) << endl;
+
+  MakeRunSummaryOld(calobject);
+  MakeRunSummary(df, classifier);
+
+  // cout << "Classifying channels" << endl;
+  // int (ChannelStatusClassifier::*fclassify)(uint64_t, float, float);
+  // fclassify = &ChannelStatusClassifier::classifyfct;
+
+  // auto f = [](uint64_t n, float m, float r) { return classifier.classifyfct(n, m, r); };
+  // auto df2 = df.Define("cat", f, {"nentries", "mean", "rms"});
+  // // df.Define("cat", (classifier.*classify), {"nentries", "mean", "rms"});
+
+  // cout << "Display summary" << endl;
+  // MakeClassSummary(df2.Filter("cat==3"));
 
 }
 
@@ -202,7 +211,34 @@ protected:
   TCanvas* mParent;
 };
 
-// TCanvas* MakeClassSummary(RDataFrame& df)
+template <typename T>
+T* MakePadAndDraw(Double_t xlow, Double_t ylow, Double_t xup, Double_t yup, ROOT::RDF::RResultPtr<T> h, TString opt="")
+{
+  gPad->GetCanvas()->cd();
+  TPad* pad = new TPad(h->GetName(), h->GetTitle(), xlow, ylow, xup, yup);
+  pad->SetBottomMargin(0.2);
+  pad->SetLeftMargin(0.2);
+  pad->SetRightMargin(0.04);
+  pad->SetTopMargin(0.04);
+  pad->Draw();
+  pad->cd();
+  // pad->Update();
+
+  T* hh = (T*)h->Clone();
+  Double_t scale = 1. / pad->GetHNDC();
+  // cout << "scale: " << scale << " = " << pad->GetCanvas()->GetWindowHeight() << " / " << pad->GetBBox().fHeight << endl;
+  for (auto* ax : {hh->GetXaxis(), hh->GetYaxis()}) {
+    ax->SetLabelSize(scale * ax->GetLabelSize());
+    ax->SetTitleSize(scale * ax->GetTitleSize());
+    // cout << "label size = " << ax->GetLabelSize() << "     "
+        //  << "title size = " << ax->GetTitleSize() << endl;
+  }
+
+  hh->Draw(opt);
+  pad->Update();
+  return hh;
+}
+
 template<typename RDF>
 TCanvas* MakeClassSummary(RDF df)
 {
@@ -212,8 +248,7 @@ TCanvas* MakeClassSummary(RDF df)
   auto hMean = df.Histo1D({"Mean", ";mean;# channels", 100, 8.5, 11.0}, "mean");
   auto hClass = df.Histo1D("cat");
 
-  auto hGlobalPos = mydf
-    .Histo2D({"bla", ";Sector;Layer", 18, -0.5, 17.5, 6, -0.5, 5.5}, "sm", "ly");
+  auto hGlobalPos = mydf.Histo2D({"bla", ";Sector;Layer", 18, -0.5, 17.5, 6, -0.5, 5.5}, "sector", "layer");
 
   auto cnv = new TCanvas("Class Summary", "Class Summary", 1500, 1000);
 
@@ -232,33 +267,11 @@ TCanvas* MakeClassSummary(RDF df)
   return cnv;
 }
 
-TTree* MakeChannelInfoTree(const o2::trd::ChannelInfoContainer* calobject)
+
+int ChannelStatusClassifier::classify(uint64_t nentries, float mean, float rms)
 {
-  auto tree = new TTree("chinfo", "Noise information per ADC channel");
-  channel_info_t ch;
-  tree->Branch("chInfo", &ch);
-
-  for (size_t i = 0; i < calobject->getData().size(); i++) {
-    o2::trd::HelperMethods::getPositionFromGlobalChannelIndex(i, ch.det, ch.rob, ch.mcm, ch.channel);
-    ch.mean = calobject->getChannel(i).getMean();
-    ch.rms = calobject->getChannel(i).getRMS();
-    ch.nentries = calobject->getChannel(i).getEntries();
-
-    tree->Fill();
-  }
-
-  return tree;
-}
-
-int ChannelStatusClassifier::classifyfct(uint64_t nentries, float mean, float rms)
-{
-  if (nentries == 0) { 
-    return -2; 
-  }
-
-  if (mean==10.0 && rms==0.0) { 
-    return -1;
-  }
+  if (nentries == 0) { return -2; }
+  if (mean==10.0 && rms==0.0) { return -1; }
 
   for (int i=0; i<mClasses.size(); i++) {
     if (mean > mClasses[i].minMean && mean < mClasses[i].maxMean && rms > mClasses[i].minRMS && rms < mClasses[i].maxRMS) {
@@ -319,16 +332,39 @@ TH1* ChannelStatusClassifier::createHistogram()
   return hist;
 }
 
-TCanvas* MakeRunSummary(const o2::trd::ChannelInfoContainer* calobject)
+TH1* ChannelStatusClassifier::prepareHistogram(TH1* hist)
+{
+  hist->GetXaxis()->SetBinLabel(1, "Missing");
+  hist->GetXaxis()->SetBinLabel(2, "Masked");
+  hist->GetXaxis()->SetBinLabel(hist->GetNbinsX(), "Other");
+  for (int i = 0; i < mClasses.size(); i++) {
+    hist->GetXaxis()->SetBinLabel(3+i, mClasses[i].label);
+  }
+
+  hist->SetFillColor(kBlue + 1);
+  hist->SetBarWidth(0.8);
+  hist->SetBarOffset(0.1);
+  hist->SetStats(0);
+
+  return hist;
+}
+
+ROOT::RDF::TH1DModel ChannelStatusClassifier::getHistogramModel()
+{
+  int n = mClasses.size();
+  return ROOT::RDF::TH1DModel("Classes", "", n + 3, -2.5, n + 0.5);
+}
+
+TCanvas* MakeRunSummaryOld(const o2::trd::ChannelInfoContainer* calobject)
 {
   vector<TH2F*> hMeanRms = {
-    new TH2F("MeanRms1", ";Mean;RMS", 100, 0.0, 1024.0, 100, 0.0, 200.),
-    new TH2F("MeanRms2", ";Mean;RMS", 100, 0.0, 30.0, 100, 0.0, 30.0),
-    new TH2F("MeanRms2", ";Mean;RMS", 100, 8.5, 11.0, 100, 0.0, 6.0)
+    new TH2F("OldMeanRms1", ";Mean;RMS", 100, 0.0, 1024.0, 100, 0.0, 200.),
+    new TH2F("OldMeanRms2", ";Mean;RMS", 100, 0.0, 30.0, 100, 0.0, 30.0),
+    new TH2F("OldMeanRms3", ";Mean;RMS", 100, 8.5, 11.0, 100, 0.0, 6.0)
   };
 
-  auto hMean = new TH1F("Mean", ";Mean;#channels", 200, 8.5, 11.0);
-  auto hRMS = new TH1F("RMS", ";RMS;#channels", 200, 0.4, 3.0);
+  auto hMean = new TH1F("OldMean", ";Mean;#channels", 200, 8.5, 11.0);
+  auto hRMS = new TH1F("OldRMS", ";RMS;#channels", 200, 0.4, 3.0);
 
   ChannelStatusClassifier classifier;
   auto hClasses = classifier.createHistogram();
@@ -367,7 +403,7 @@ TCanvas* MakeRunSummary(const o2::trd::ChannelInfoContainer* calobject)
     // h->Draw("colz");
   }
 
-  auto cnv = new TCanvas("Noise Run Summary", "Noise Run Summary", 1500, 1000);
+  auto cnv = new TCanvas("Old Noise Run Summary", "Old Noise Run Summary", 1500, 1000);
 
   cnv->Divide(3, 2);
 
@@ -399,6 +435,69 @@ TCanvas* MakeRunSummary(const o2::trd::ChannelInfoContainer* calobject)
   gPad->SetRightMargin(0.15);
   hMeanRms[0]->Draw("colz");
   classifier.drawClasses(hMeanRms[0]);
+
+  return cnv;
+}
+
+TCanvas* MakeRunSummary(ROOT::RDF::RNode df_all, ChannelStatusClassifier& classifier)
+{
+
+  auto df = df_all.Filter("class >= 0");
+
+  auto hMeanRms1 = df.Histo2D({"MeanRms1", ";Mean;RMS", 100, 0.0, 1024.0, 100, 0.0, 200.}, "mean", "rms");
+  auto hMeanRms2 = df.Histo2D({"MeanRms2", ";Mean;RMS", 100, 0.0, 30.0, 100, 0.0, 30.0}, "mean", "rms");
+  auto hMeanRms3 = df.Histo2D({"MeanRms2", ";Mean;RMS", 100, 8.5, 11.0, 100, 0.0, 6.0}, "mean", "rms");
+
+  auto hMean = df.Histo1D({"Mean", ";Mean;#channels", 200, 8.5, 11.0}, "mean");
+  auto hRMS = df.Histo1D({"RMS", ";RMS;#channels", 200, 0.4, 3.0}, "rms");
+
+  auto hClasses = df_all.Histo1D(classifier.getHistogramModel(), "class");
+
+  auto maxmean = df.Max("mean");
+  auto maxrms = df.Max("rms");
+
+  hMeanRms1->GetXaxis()->SetRangeUser(0.0, *maxmean * 1.1);
+  hMeanRms1->GetYaxis()->SetRangeUser(0.0, *maxrms * 1.1);
+
+
+  auto cnv = new TCanvas("Noise Run Summary", "Noise Run Summary", 1500, 1000);
+
+  // cnv->Divide(3, 2);
+
+  gStyle->SetOptStat(1);
+
+  auto h = MakePadAndDraw(0.0, 0.5, 0.33, 1.0, hRMS);
+  // h->SetStats(kTRUE);
+  // h->Draw();
+  gPad->SetLogy();
+  // gPad->Update();
+
+  MakePadAndDraw(0.34, 0.5, 0.66, 1.0, hMean);
+  // h->SetStats(kTRUE);
+  gPad->SetLogy();
+  // gPad->Update();
+
+  gStyle->SetOptStat(0);
+
+  auto h1 = MakePadAndDraw(0.67, 0.5, 1.00, 1.0, hClasses, "hbar");
+  classifier.prepareHistogram(h1);
+  gPad->SetLogx();
+
+  auto h2 = MakePadAndDraw(0.00, 0.0, 0.33, 0.5, hMeanRms3, "colz");
+  classifier.drawClasses(h2);
+
+  auto h3 = MakePadAndDraw(0.34, 0.0, 0.66, 0.5, hMeanRms2, "colz");
+  classifier.drawClasses(h3);
+
+  auto h4 = MakePadAndDraw(0.67, 0.0, 1.00, 0.5, hMeanRms1, "colz");
+  classifier.drawClasses(h4);
+
+  // cnv->cd(3);
+  // // gPad->SetLogx();
+  // gPad->SetLeftMargin(0.15);
+  // // hClasses->Draw("hbar");
+  // // hClasses->Draw("text");
+
 
   return cnv;
 }
